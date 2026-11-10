@@ -1,12 +1,4 @@
 
-"""Data models 
-
-Architecture:
-Movie -> Scenes -> Elements -> Chunks
-
-Chunks are the searchable units.
-Readable text is kept separate from index text.
-"""
 
 from __future__ import annotations
 

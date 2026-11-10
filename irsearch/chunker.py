@@ -130,3 +130,22 @@ def chunk_scene(scene: Scene, movie_id: str, cfg: Config) -> list[Chunk]:
             )
         )
     return chunks
+def chunk_scenes(scenes, movie_id, cfg=None):
+    """
+    Convert all scenes of one movie into searchable chunks.
+
+    Each scene is processed independently.
+    Chunks from different scenes are never mixed.
+    """
+    all_chunks = []
+
+    for scene in scenes:
+        chunks = chunk_scene(
+            scene=scene,
+            movie_id=movie_id,
+            cfg=cfg
+        )
+
+        all_chunks.extend(chunks)
+
+    return all_chunks
