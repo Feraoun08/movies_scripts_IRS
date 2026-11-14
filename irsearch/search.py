@@ -51,9 +51,9 @@ class SearchEngine:
                 "ranking_method must be 'bm25' or 'tfidf'."
             )
 
-    # --------------------------------------------------
+    
     # FILTERING
-    # --------------------------------------------------
+    
 
     @staticmethod
     def _matches_filters(
@@ -132,9 +132,9 @@ class SearchEngine:
         exhausted = limit is None or len(ranked) < limit
         return grouped, exhausted
 
-    # --------------------------------------------------
+    
     # SCENE SEARCH
-    # --------------------------------------------------
+    
 
     def search(
         self,
@@ -156,9 +156,9 @@ class SearchEngine:
         The scene score is the highest matching chunk score.
         """
 
-        # --------------------------------------------------
+        
         # STEP 1: VALIDATE INPUT
-        # --------------------------------------------------
+        
 
         if not isinstance(query, str):
             raise TypeError("query must be a string.")
@@ -178,18 +178,18 @@ class SearchEngine:
                     "min_rating cannot be greater than max_rating."
                 )
 
-        # --------------------------------------------------
+       
         # STEP 2: PREPROCESS QUERY
-        # --------------------------------------------------
+       
 
         query_tokens = self.preprocessor.process(query)
 
         if not query_tokens:
             return []
 
-        # --------------------------------------------------
+        
         # STEP 3: RANK MATCHING CHUNKS
-        # --------------------------------------------------
+        
 
         filters_active = any(
             value is not None
@@ -225,9 +225,9 @@ class SearchEngine:
             return []
 
         scene_keys = list(grouped_scenes.keys())
-        # --------------------------------------------------
+       
         # STEP 6: RETRIEVE COMPLETE SCENES FROM SQLITE
-        # --------------------------------------------------
+        
 
         complete_scenes = self.store.get_scenes(scene_keys)
 
@@ -257,9 +257,9 @@ class SearchEngine:
 
             results.append(result)
 
-        # --------------------------------------------------
+        
         # STEP 7: APPLY MOVIE METADATA FILTERS
-        # --------------------------------------------------
+        
 
         if filters_active:
 
@@ -276,9 +276,9 @@ class SearchEngine:
                 )
             ]
 
-        # --------------------------------------------------
+       
         # STEP 8: SORT AND RETURN UNIQUE SCENES
-        # --------------------------------------------------
+        
 
         results.sort(
             key=lambda result: (
@@ -293,9 +293,9 @@ class SearchEngine:
 
         return results
 
-    # --------------------------------------------------
+    
     # QUERY INFORMATION
-    # --------------------------------------------------
+    
 
     def explain_query(self, query: str) -> dict[str, Any]:
         """Show how a query is processed."""
@@ -325,9 +325,9 @@ class SearchEngine:
 
         return result
 
-    # --------------------------------------------------
+    
     # STATISTICS
-    # --------------------------------------------------
+    
 
     def stats(self) -> dict[str, Any]:
         """Return search engine statistics."""

@@ -1,17 +1,4 @@
 
-"""Build and load the CineSearch corpus.
-
-Build flow:
-    Movie -> Scenes -> Chunks
-                   |         |
-                   |         +--> Readable text -> SQLite
-                   |
-                   +------------> Preprocessing -> Inverted index
-
-SQLite stores original readable content.
-The inverted index stores processed terms.
-SQLite chunk_id and index doc_id always share the same ID.
-"""
 
 from __future__ import annotations
 

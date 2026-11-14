@@ -1,7 +1,7 @@
 
 import csv
 import json
-from .dataset import (
+from irsearch.dataset import (
     load_dataset,
     iter_movies,
     resolve_source,

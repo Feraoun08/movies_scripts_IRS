@@ -8,7 +8,7 @@ ROOT = Path(r"C:\Users\User\Downloads\movies_script")
 MOVIE_ID = "1179933"
 
 # 1. Inspect metadata CSV files
-print("\n========== METADATA ==========")
+print("\nMETADATA ")
 
 metadata_dir = ROOT / "movie_metadata"
 
@@ -30,7 +30,7 @@ for csv_file in metadata_dir.glob("*.csv"):
 
 
 # 2. Find files belonging to the same movie
-print("\n========== MOVIE FILES ==========")
+print("\n MOVIE FILES ")
 
 for path in ROOT.rglob(f"*{MOVIE_ID}*"):
     if path.is_file():
@@ -38,7 +38,7 @@ for path in ROOT.rglob(f"*{MOVIE_ID}*"):
 
 
 # 3. Inspect one annotated text file
-print("\n========== ANNOTATION SAMPLE ==========")
+print("\nANNOTATION SAMPLE")
 
 annotation_dirs = [
     ROOT / "screenplay_data/data/manual_annotations",
@@ -65,7 +65,7 @@ for directory in annotation_dirs:
 
 
 # 4. Inspect the rule-based JSON structure
-print("\n========== RULE-BASED JSON ==========")
+print("\nRULE-BASED JSON ")
 
 json_dir = ROOT / "screenplay_data/data/rule_based_annotations"
 

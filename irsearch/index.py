@@ -264,9 +264,9 @@ class InvertedIndex:
             "length": self.doc_lengths[doc_id],
         }
 
-    # -----------------------------------------------------
+   
     # 4. SAVING AND LOADING
-    # -----------------------------------------------------
+   
 
     def save(self, path: str | Path) -> None:
 
