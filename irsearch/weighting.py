@@ -345,3 +345,133 @@ Usage:
 
     store.close()
 """
+
+class BM25Model:
+    """Rank screenplay chunks using the BM25 algorithm."""
+
+    def __init__(
+        self,
+        index,
+        k1: float = 1.5,
+        b: float = 0.75,
+    ) -> None:
+
+        if k1 <= 0:
+            raise ValueError("k1 must be positive.")
+
+        if not 0 <= b <= 1:
+            raise ValueError("b must be between 0 and 1.")
+
+        self.index = index
+        self.k1 = k1
+        self.b = b
+
+        stats = index.stats()
+
+        self.n_documents = stats["N_documents"]
+        self.avg_doc_length = stats["avg_doc_length"]
+
+    def _idf(self, df: int) -> float:
+        """Calculate BM25 inverse document frequency."""
+
+        return math.log(
+            1 + (
+                self.n_documents - df + 0.5
+            ) / (
+                df + 0.5
+            )
+        )
+
+    def score(
+        self,
+        query_tokens: Iterable[str],
+        top_k: int | None = 10,
+        candidate_doc_ids: Iterable[int] | None = None,
+    ) -> list[tuple[int, float]]:
+        """Return documents ranked by BM25 score."""
+
+        if top_k is not None and top_k <= 0:
+            raise ValueError("top_k must be positive or None.")
+
+        if self.n_documents == 0 or self.avg_doc_length <= 0:
+            return []
+
+        query_frequencies = Counter(query_tokens)
+
+        if not query_frequencies:
+            return []
+
+        # Only documents containing at least one query term
+        # can receive a positive score.
+        if candidate_doc_ids is None:
+            candidates = None
+        else:
+            candidates = set(candidate_doc_ids)
+
+            for doc_id in candidates:
+                if (
+                    not isinstance(doc_id, int)
+                    or isinstance(doc_id, bool)
+                    or not 0 <= doc_id < self.n_documents
+                ):
+                    raise ValueError(
+                        f"Invalid candidate document ID: {doc_id}"
+                    )
+
+            if not candidates:
+                return []
+
+        scores: dict[int, float] = {}
+
+        for term, query_tf in query_frequencies.items():
+
+            df = self.index.df(term)
+
+            if df == 0:
+                continue
+
+            idf = self._idf(df)
+
+            for doc_id, tf in self.index.iter_postings(term):
+
+                if candidates is not None and doc_id not in candidates:
+                    continue
+
+                doc_length = self.index.doc_lengths[doc_id]
+
+                length_ratio = (
+                    doc_length / self.avg_doc_length
+                )
+
+                denominator = tf + self.k1 * (
+                    1 - self.b + self.b * length_ratio
+                )
+
+                term_score = idf * (
+                    tf * (self.k1 + 1)
+                ) / denominator
+
+                # Repeated query terms contribute more.
+                scores[doc_id] = (
+                    scores.get(doc_id, 0.0)
+                    + query_tf * term_score
+                )
+
+        results = sorted(
+            scores.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+
+        if top_k is not None:
+            results = results[:top_k]
+
+        return results
+
+    def stats(self) -> dict:
+        return {
+            "ranking": "BM25",
+            "N_documents": self.n_documents,
+            "average_document_length": self.avg_doc_length,
+            "k1": self.k1,
+            "b": self.b,
+        }

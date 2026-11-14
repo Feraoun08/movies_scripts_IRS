@@ -1,10 +1,11 @@
 
 """Readable corpus store (SQLite): Movie -> Scenes -> Chunks.
 
-The original readable text is stored here.
+The original readable screenplay and complete scenes are stored here.
 
-The inverted index stores only preprocessed terms. A search result
-(doc_id) is resolved to its readable chunk using the same chunk_id.
+The inverted index stores preprocessed terms. Search results
+are resolved to their readable chunks and complete scenes using
+the shared document IDs and scene identifiers.
 """
 
 from __future__ import annotations
@@ -68,6 +69,7 @@ ON movies(imdb_rating);
 
 
 class CorpusStore:
+    """Manage the readable movie, scene and chunk corpus in SQLite."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -76,14 +78,14 @@ class CorpusStore:
         self.db = sqlite3.connect(self.path)
         self.db.row_factory = sqlite3.Row
 
-        # Enable foreign-key enforcement for this connection.
+        # Enable foreign-key enforcement.
         self.db.execute("PRAGMA foreign_keys = ON")
 
         self.db.executescript(_SCHEMA)
 
-    # ---------------------------------------------------------
-    # JSON helper
-    # ---------------------------------------------------------
+    
+    # JSON HELPER
+    
 
     @staticmethod
     def _json_list(value: str | None) -> list:
@@ -99,12 +101,12 @@ class CorpusStore:
 
         return result if isinstance(result, list) else []
 
-    # ---------------------------------------------------------
-    # Writing
-    # ---------------------------------------------------------
+    
+    # WRITING
+    
 
     def add_movie(self, movie: MovieRecord) -> None:
-        """Insert a movie or update its metadata if it already exists."""
+        """Insert a movie or update its metadata if it exists."""
 
         self.db.execute(
             """
@@ -219,9 +221,9 @@ class CorpusStore:
         self.db.commit()
         self.db.close()
 
-    # ---------------------------------------------------------
-    # Reading
-    # ---------------------------------------------------------
+    
+    # CHUNK RETRIEVAL
+    
 
     def get_chunks(self, chunk_ids: Iterable[int]) -> list[dict]:
         """Retrieve readable chunks while preserving requested ID order."""
@@ -232,9 +234,6 @@ class CorpusStore:
             return []
 
         by_id = {}
-
-        # Keep batches below SQLite's commonly encountered
-        # maximum number of SQL parameters.
         batch_size = 900
 
         for start in range(0, len(ids), batch_size):
@@ -292,30 +291,227 @@ class CorpusStore:
 
                 by_id[data["chunk_id"]] = data
 
-        # Preserve the original ranking order.
-        # Missing IDs are ignored.
         return [
             by_id[chunk_id]
             for chunk_id in ids
             if chunk_id in by_id
         ]
 
+    
+    # COMPLETE SCENE RETRIEVAL
+    
+
     def get_scene(
         self,
         movie_id: str,
-        scene_idx: int
+        scene_idx: int,
     ) -> dict | None:
+        """Retrieve one complete scene with its movie metadata."""
 
         row = self.db.execute(
             """
-            SELECT *
-            FROM scenes
-            WHERE movie_id = ? AND scene_idx = ?
+            SELECT
+                s.movie_id,
+                s.scene_idx,
+                s.heading,
+                s.int_ext,
+                s.location,
+                s.time_of_day,
+                s.n_words,
+                s.has_boundary,
+                s.text,
+
+                m.title,
+                m.year,
+                m.genres,
+                m.imdb_rating,
+                m.metascore,
+                m.imdb_votes
+
+            FROM scenes s
+
+            JOIN movies m
+                ON m.movie_id = s.movie_id
+
+            WHERE s.movie_id = ?
+              AND s.scene_idx = ?
             """,
             (movie_id, scene_idx),
         ).fetchone()
 
-        return dict(row) if row else None
+        if row is None:
+            return None
+
+        data = dict(row)
+        data["genres"] = self._json_list(data["genres"])
+
+        return data
+
+    def get_scenes(
+        self,
+        scene_keys: Iterable[tuple[str, int]],
+    ) -> list[dict]:
+        """
+        Retrieve multiple complete scenes.
+
+        Args:
+            scene_keys:
+                Iterable of (movie_id, scene_idx) pairs.
+
+        Returns:
+            Complete scenes with movie metadata, preserving
+            the requested scene order.
+        """
+
+        keys = list(dict.fromkeys(scene_keys))
+
+        if not keys:
+            return []
+
+        by_key = {}
+        batch_size = 400
+
+        for start in range(0, len(keys), batch_size):
+
+            batch = keys[start:start + batch_size]
+
+            conditions = " OR ".join(
+                "(s.movie_id = ? AND s.scene_idx = ?)"
+                for _ in batch
+            )
+
+            parameters = [
+                value
+                for movie_id, scene_idx in batch
+                for value in (movie_id, scene_idx)
+            ]
+
+            rows = self.db.execute(
+                f"""
+                SELECT
+                    s.movie_id,
+                    s.scene_idx,
+                    s.heading,
+                    s.int_ext,
+                    s.location,
+                    s.time_of_day,
+                    s.n_words,
+                    s.has_boundary,
+                    s.text,
+
+                    m.title,
+                    m.year,
+                    m.genres,
+                    m.imdb_rating,
+                    m.metascore,
+                    m.imdb_votes
+
+                FROM scenes s
+
+                JOIN movies m
+                    ON m.movie_id = s.movie_id
+
+                WHERE {conditions}
+                """,
+                parameters,
+            ).fetchall()
+
+            for row in rows:
+
+                data = dict(row)
+
+                data["genres"] = self._json_list(
+                    data["genres"]
+                )
+
+                key = (
+                    data["movie_id"],
+                    data["scene_idx"],
+                )
+
+                by_key[key] = data
+
+        return [
+            by_key[key]
+            for key in keys
+            if key in by_key
+        ]
+
+    
+    # MOVIE RETRIEVAL
+    
+
+    def search_movies(
+        self,
+        title: str | None = None,
+        year: int | None = None,
+        min_rating: float | None = None,
+        max_rating: float | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """
+        Search movies using their metadata, independently
+        of screenplay text.
+        """
+
+        if limit <= 0:
+            raise ValueError("limit must be positive.")
+
+        conditions = []
+        parameters = []
+
+        if title:
+            conditions.append("LOWER(title) LIKE LOWER(?)")
+            parameters.append(f"%{title}%")
+
+        if year is not None:
+            conditions.append("year = ?")
+            parameters.append(year)
+
+        if min_rating is not None:
+            conditions.append("imdb_rating >= ?")
+            parameters.append(min_rating)
+
+        if max_rating is not None:
+            conditions.append("imdb_rating <= ?")
+            parameters.append(max_rating)
+
+        where_clause = (
+            "WHERE " + " AND ".join(conditions)
+            if conditions else ""
+        )
+
+        rows = self.db.execute(
+            f"""
+            SELECT *
+            FROM movies
+            {where_clause}
+            ORDER BY
+                CASE WHEN imdb_rating IS NULL THEN 1 ELSE 0 END,
+                imdb_rating DESC,
+                title COLLATE NOCASE
+            LIMIT ?
+            """,
+            (*parameters, limit),
+        ).fetchall()
+
+        results = []
+
+        for row in rows:
+
+            data = dict(row)
+
+            data["genres"] = self._json_list(
+                data["genres"]
+            )
+
+            results.append(data)
+
+        return results
+
+    
+    # STATISTICS
+    
 
     def counts(self) -> dict[str, int]:
         """Return the number of movies, scenes and chunks."""
@@ -327,18 +523,20 @@ class CorpusStore:
             for table in ("movies", "scenes", "chunks")
         }
 
-    # ---------------------------------------------------------
-    # Context manager
-    # ---------------------------------------------------------
+    
+    # CONTEXT MANAGER
+    
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+
         if exc_type is None:
             self.db.commit()
         else:
             self.db.rollback()
 
         self.db.close()
+
         return False

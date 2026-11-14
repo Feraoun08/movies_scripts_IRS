@@ -1,36 +1,59 @@
 
+"""Scene-level search engine for CineSearch.
 
+Searches indexed screenplay chunks internally, groups matching
+chunks by their original scene, and returns complete readable scenes.
+
+Supports:
+    - BM25 ranking
+    - TF-IDF ranking
+    - Movie metadata filters
+    - Complete scene retrieval
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
-from .weighting import WeightingModel
+from .weighting import WeightingModel, BM25Model
 
 
 class SearchEngine:
-    """Search screenplay chunks and return ranked readable results."""
+    """Search screenplay scenes and return ranked complete scenes."""
 
     def __init__(
         self,
         index,
         store,
         preprocessor,
+        ranking_method: str = "bm25",
         tf_mode: str = "raw",
     ) -> None:
+
         self.index = index
         self.store = store
         self.preprocessor = preprocessor
+        self.ranking_method = ranking_method
 
-        # Build the TF-IDF document vectors.
-        self.weighting = WeightingModel(
-            index=index,
-            tf_mode=tf_mode,
-        )
+        if ranking_method == "bm25":
 
-   
+            self.weighting = BM25Model(index)
+
+        elif ranking_method == "tfidf":
+
+            self.weighting = WeightingModel(
+                index=index,
+                tf_mode=tf_mode,
+            )
+
+        else:
+            raise ValueError(
+                "ranking_method must be 'bm25' or 'tfidf'."
+            )
+
+    # --------------------------------------------------
     # FILTERING
-   
+    # --------------------------------------------------
 
     @staticmethod
     def _matches_filters(
@@ -42,28 +65,23 @@ class SearchEngine:
         max_rating: float | None = None,
         title: str | None = None,
     ) -> bool:
-        """Check whether a result satisfies the requested filters."""
+        """Check whether a scene's movie satisfies the filters."""
 
-        # Movie year.
         if year is not None and result.get("year") != year:
             return False
 
-        # Genre: case-insensitive partial match.
         if genre:
             genres = result.get("genres") or []
 
             if isinstance(genres, str):
                 genres = [genres]
 
-            genre_matches = any(
+            if not any(
                 genre.casefold() in str(item).casefold()
                 for item in genres
-            )
-
-            if not genre_matches:
+            ):
                 return False
 
-        # IMDb rating.
         rating = result.get("imdb_rating")
 
         if min_rating is not None:
@@ -74,7 +92,6 @@ class SearchEngine:
             if rating is None or rating > max_rating:
                 return False
 
-        # Movie title: case-insensitive partial match.
         if title:
             movie_title = result.get("title") or ""
 
@@ -83,9 +100,41 @@ class SearchEngine:
 
         return True
 
-  
-    # SEARCH
-    
+
+        MAX_CHUNK_LIMIT = 8000
+
+    def _rank_and_group(self, query_tokens, limit):
+        ranked = self.weighting.score(query_tokens=query_tokens, top_k=limit)
+
+        if not ranked:
+            return {}, True
+
+        chunks = self.store.get_chunks([doc_id for doc_id, _ in ranked])
+        chunks_by_id = {chunk["chunk_id"]: chunk for chunk in chunks}
+
+        grouped = {}
+        for doc_id, score in ranked:
+            chunk = chunks_by_id.get(doc_id)
+            if chunk is None:
+                continue
+
+            key = (chunk["movie_id"], chunk["scene_idx"])
+            entry = grouped.setdefault(
+                key, {"score": score, "matched_chunks": []}
+            )
+            entry["matched_chunks"].append({
+                "chunk_id": doc_id,
+                "part_idx": chunk["part_idx"],
+                "score": score,
+                "text": chunk["text"],
+            })
+
+        exhausted = limit is None or len(ranked) < limit
+        return grouped, exhausted
+
+    # --------------------------------------------------
+    # SCENE SEARCH
+    # --------------------------------------------------
 
     def search(
         self,
@@ -98,7 +147,19 @@ class SearchEngine:
         max_rating: float | None = None,
         title: str | None = None,
     ) -> list[dict[str, Any]]:
-        # Validate parameters.
+        """
+        Search screenplay content and return complete scenes.
+
+        Results are grouped by movie and scene. If multiple chunks
+        match the same scene, that scene appears only once.
+
+        The scene score is the highest matching chunk score.
+        """
+
+        # --------------------------------------------------
+        # STEP 1: VALIDATE INPUT
+        # --------------------------------------------------
+
         if not isinstance(query, str):
             raise TypeError("query must be a string.")
 
@@ -107,7 +168,9 @@ class SearchEngine:
             or isinstance(top_k, bool)
             or top_k <= 0
         ):
-            raise ValueError("top_k must be a positive integer or None.")
+            raise ValueError(
+                "top_k must be a positive integer or None."
+            )
 
         if min_rating is not None and max_rating is not None:
             if min_rating > max_rating:
@@ -115,18 +178,18 @@ class SearchEngine:
                     "min_rating cannot be greater than max_rating."
                 )
 
-        
-        # STEP 1: PREPROCESS THE QUERY
-        
+        # --------------------------------------------------
+        # STEP 2: PREPROCESS QUERY
+        # --------------------------------------------------
 
         query_tokens = self.preprocessor.process(query)
 
         if not query_tokens:
             return []
 
-        
-        # STEP 2: FIND RELEVANT DOCUMENTS
-       
+        # --------------------------------------------------
+        # STEP 3: RANK MATCHING CHUNKS
+        # --------------------------------------------------
 
         filters_active = any(
             value is not None
@@ -139,62 +202,67 @@ class SearchEngine:
             )
         )
 
-        # When filters are active, retrieve all matching documents
-        # first so that filtering does not accidentally remove
-        # relevant results before the filters are applied.
-        search_limit = None if filters_active else top_k
+        if filters_active or top_k is None:
+            limit = None
+        else:
+            limit = top_k * 20
 
-        ranked_documents = self.weighting.score(
-            query_tokens=query_tokens,
-            top_k=search_limit,
-        )
+        while True:
+            grouped_scenes, exhausted = self._rank_and_group(
+                query_tokens, limit
+            )
 
-        if not ranked_documents:
+            if (
+                exhausted
+                or len(grouped_scenes) >= top_k
+                or limit >= self.MAX_CHUNK_LIMIT
+            ):
+                break
+
+            limit = min(limit * 4, self.MAX_CHUNK_LIMIT)
+
+        if not grouped_scenes:
             return []
 
-        
-        # STEP 3: RETRIEVE ORIGINAL CHUNK TEXT FROM SQLITE
-        
+        scene_keys = list(grouped_scenes.keys())
+        # --------------------------------------------------
+        # STEP 6: RETRIEVE COMPLETE SCENES FROM SQLITE
+        # --------------------------------------------------
 
-        document_ids = [
-            doc_id
-            for doc_id, similarity in ranked_documents
-        ]
-
-        stored_chunks = self.store.get_chunks(document_ids)
-
-        # SQLite returns readable chunks in the requested order.
-        # Build a lookup to reconnect each chunk to its score.
-        chunks_by_id = {
-            chunk["chunk_id"]: chunk
-            for chunk in stored_chunks
-        }
-
-        
-        # STEP 4: COMBINE SCORES AND CHUNK INFORMATION
-        
+        complete_scenes = self.store.get_scenes(scene_keys)
 
         results = []
 
-        for doc_id, similarity in ranked_documents:
+        for scene in complete_scenes:
 
-            chunk = chunks_by_id.get(doc_id)
+            scene_key = (
+                scene["movie_id"],
+                scene["scene_idx"],
+            )
 
-            # Skip documents that have no corresponding SQLite chunk.
-            if chunk is None:
-                continue
+            match_info = grouped_scenes[scene_key]
 
-            result = dict(chunk)
+            result = dict(scene)
 
-            result["similarity"] = similarity
+            result["score"] = match_info["score"]
+            result["ranking_method"] = self.ranking_method
+
+            result["matched_chunks"] = match_info[
+                "matched_chunks"
+            ]
+
+            result["matched_chunk_count"] = len(
+                match_info["matched_chunks"]
+            )
 
             results.append(result)
 
-        
-        # STEP 5: APPLY METADATA FILTERS
-        
+        # --------------------------------------------------
+        # STEP 7: APPLY MOVIE METADATA FILTERS
+        # --------------------------------------------------
 
         if filters_active:
+
             results = [
                 result
                 for result in results
@@ -208,38 +276,58 @@ class SearchEngine:
                 )
             ]
 
-        
-        # STEP 6: RETURN THE TOP RESULTS
-        
+        # --------------------------------------------------
+        # STEP 8: SORT AND RETURN UNIQUE SCENES
+        # --------------------------------------------------
+
+        results.sort(
+            key=lambda result: (
+                -result["score"],
+                result["movie_id"],
+                result["scene_idx"],
+            )
+        )
 
         if top_k is not None:
             results = results[:top_k]
 
         return results
 
-    
+    # --------------------------------------------------
     # QUERY INFORMATION
-    
+    # --------------------------------------------------
 
     def explain_query(self, query: str) -> dict[str, Any]:
-        """Show how a query is processed by the search engine."""
+        """Show how a query is processed."""
 
         if not isinstance(query, str):
             raise TypeError("query must be a string.")
 
         tokens = self.preprocessor.process(query)
-        query_vector = self.weighting.transform_query(tokens)
 
-        return {
+        recognized_terms = [
+            term
+            for term in dict.fromkeys(tokens)
+            if self.index.df(term) > 0
+        ]
+
+        result = {
             "original_query": query,
             "processed_tokens": tokens,
-            "recognized_terms": list(query_vector.keys()),
-            "query_vector": query_vector,
+            "recognized_terms": recognized_terms,
+            "ranking_method": self.ranking_method,
         }
 
-    
+        if self.ranking_method == "tfidf":
+            result["query_vector"] = (
+                self.weighting.transform_query(tokens)
+            )
+
+        return result
+
+    # --------------------------------------------------
     # STATISTICS
-   
+    # --------------------------------------------------
 
     def stats(self) -> dict[str, Any]:
         """Return search engine statistics."""
@@ -249,47 +337,3 @@ class SearchEngine:
             "weighting": self.weighting.stats(),
             "database": self.store.counts(),
         }
-
-
-
-"""Search engine for CineSearch.
-
-Connects:
-    - Preprocessor: processes user queries.
-    - InvertedIndex: retrieves candidate documents.
-    - WeightingModel: calculates TF-IDF and cosine similarity.
-    - CorpusStore: retrieves original readable screenplay chunks.
-
-The index document ID and SQLite chunk ID must refer to the same chunk.
-
-
- 
-        Search screenplay chunks using TF-IDF and cosine similarity.
-
-        Args:
-            query:
-                User's original text query.
-
-            top_k:
-                Maximum number of results.
-                None returns all matching results.
-
-            year:
-                Optional exact movie release year.
-
-            genre:
-                Optional case-insensitive partial genre match.
-
-            min_rating:
-                Optional minimum IMDb rating.
-
-            max_rating:
-                Optional maximum IMDb rating.
-
-            title:
-                Optional case-insensitive partial movie title.
-
-        Returns:
-            A list of dictionaries ordered by decreasing similarity.
-            Each result contains the readable chunk and movie metadata.
-        """
